@@ -1,0 +1,31 @@
+{
+  "name": "zepta",
+  "version": "0.1.0",
+  "description": "Fast terminal CLI for Xcode/iOS/macOS workflows – build, run, test, simulate without opening Xcode",
+  "main": "zepta.js",
+  "bin": {
+    "zepta": "zepta.js"
+  },
+  "license": "MIT",
+  "keywords": [
+    "xcode",
+    "cli",
+    "ios",
+    "macos",
+    "build",
+    "simulator"
+  ],
+  "scripts": {
+    "build": "node scripts/build.js",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "files": [
+    "zepta.js",
+    "README.md",
+    "docs"
+  ]
+}

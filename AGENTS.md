@@ -1,0 +1,1 @@
+Update documentation and changelog for every change.
