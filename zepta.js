@@ -27,6 +27,120 @@ function getCommandOutput(cmd, args = [], options = {}) {
   return runCommand(cmd, args, { stdio: 'pipe', ...options });
 }
 
+// Run command without exiting on non-zero; returns { status, stdout, stderr }
+function runCommandNoExit(cmd, args = [], options = {}) {
+  const opts = { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], ...options };
+  if (options.cwd) opts.cwd = options.cwd;
+  const result = spawnSync(cmd, args, opts);
+  return {
+    status: result.status,
+    stdout: (result.stdout || '').toString().trim(),
+    stderr: (result.stderr || '').toString().trim(),
+    error: result.error
+  };
+}
+
+// Parse Swift/Clang error and warning lines from xcodebuild output. Returns array of { file, line, column, message, severity }.
+function parseBuildErrors(text) {
+  const lines = (text || '').split('\n');
+  const results = [];
+  // file:line:column: error: message  (column optional in some outputs)
+  const re = /^(.+?):(\d+):(\d+)?:?\s*(error|warning):\s*(.+)$/;
+  for (const line of lines) {
+    const m = line.match(re);
+    if (m) {
+      results.push({
+        file: m[1].trim(),
+        line: parseInt(m[2], 10),
+        column: m[3] ? parseInt(m[3], 10) : 0,
+        message: (m[5] || '').trim(),
+        severity: m[4]
+      });
+    }
+  }
+  return results;
+}
+
+// In-memory caches (TTL in ms)
+const SIMCTL_CACHE = { data: null, ts: 0, TTL: 60000 };
+const XCODE_LIST_CACHE = { key: null, data: null, ts: 0, TTL: 60000 };
+
+function getSimulatorListCached() {
+  const now = Date.now();
+  if (SIMCTL_CACHE.data != null && (now - SIMCTL_CACHE.ts) < SIMCTL_CACHE.TTL) {
+    return SIMCTL_CACHE.data;
+  }
+  const raw = spawnSync('xcrun', ['simctl', 'list', '-j'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+  const out = raw.status === 0 && raw.stdout ? raw.stdout.trim() : '{}';
+  SIMCTL_CACHE.data = parseJsonOutput(out) || {};
+  SIMCTL_CACHE.ts = now;
+  return SIMCTL_CACHE.data;
+}
+
+function invalidateSimulatorCache() {
+  SIMCTL_CACHE.data = null;
+  SIMCTL_CACHE.ts = 0;
+}
+
+function getDeviceTypesList() {
+  const raw = spawnSync('xcrun', ['simctl', 'list', 'devicetypes', '-j'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+  const out = raw.status === 0 && raw.stdout ? raw.stdout.trim() : '{}';
+  const j = parseJsonOutput(out);
+  return (j && j.devicetypes) ? j.devicetypes : [];
+}
+
+function getRuntimesList() {
+  const raw = spawnSync('xcrun', ['simctl', 'list', 'runtimes', '-j'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+  const out = raw.status === 0 && raw.stdout ? raw.stdout.trim() : '{}';
+  const j = parseJsonOutput(out);
+  return (j && j.runtimes) ? j.runtimes : [];
+}
+
+function findDeviceTypeByName(deviceTypes, name) {
+  if (!name || !Array.isArray(deviceTypes)) return null;
+  const exact = deviceTypes.find(d => d.name === name);
+  if (exact) return exact;
+  return deviceTypes.find(d => d.name && d.name.includes(name)) || null;
+}
+
+function findRuntimesForDeviceType(runtimes, deviceTypeIdentifier) {
+  if (!deviceTypeIdentifier || !Array.isArray(runtimes)) return [];
+  return runtimes.filter(r => {
+    if (r.isAvailable !== true) return false;
+    const supported = r.supportedDeviceTypes || [];
+    return supported.some(s => s.identifier === deviceTypeIdentifier);
+  });
+}
+
+function createSimulator(name, deviceTypeIdentifier, runtimeIdentifier) {
+  const res = spawnSync('xcrun', ['simctl', 'create', name, deviceTypeIdentifier, runtimeIdentifier], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+  if (res.status !== 0) {
+    const err = (res.stderr || res.stdout || '').trim();
+    throw new Error(err || 'simctl create failed');
+  }
+  invalidateSimulatorCache();
+  return (res.stdout || '').trim();
+}
+
+function getXcodeListCached(projectDir, workspace) {
+  const now = Date.now();
+  const key = `${projectDir}:${workspace || ''}`;
+  if (XCODE_LIST_CACHE.key === key && XCODE_LIST_CACHE.data != null && (now - XCODE_LIST_CACHE.ts) < XCODE_LIST_CACHE.TTL) {
+    return XCODE_LIST_CACHE.data;
+  }
+  const listArgs = ['-list'];
+  if (workspace) {
+    const wp = path.isAbsolute(workspace) ? workspace : path.join(projectDir, workspace);
+    listArgs.push(wp.endsWith('.xcworkspace') ? '-workspace' : '-project', wp);
+  }
+  const res = spawnSync('xcodebuild', listArgs, { cwd: projectDir, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+  const listOutput = res.status === 0 && res.stdout ? res.stdout.trim() : '';
+  XCODE_LIST_CACHE.key = key;
+  XCODE_LIST_CACHE.data = { listOutput, listJson: parseJsonOutput(listOutput) };
+  XCODE_LIST_CACHE.ts = now;
+  return XCODE_LIST_CACHE.data;
+}
+
 // Helper to parse JSON from command if possible
 function parseJsonOutput(output) {
   try {
@@ -210,11 +324,11 @@ function getOption(key) {
 // Default derived data path
 const defaultDerivedData = path.join(os.homedir(), 'Library/Developer/zepta/DerivedData');
 
-// Resolve simulator UDID by name or return as-is if already UDID-like
+// Resolve simulator UDID by name or return as-is if already UDID-like (uses cache)
 function resolveSimulatorUdid(nameOrUdid) {
   if (!nameOrUdid) return null;
   if (/^[0-9A-F-]{36}$/i.test(nameOrUdid)) return nameOrUdid;
-  const simList = parseJsonOutput(getCommandOutput('xcrun', ['simctl', 'list', '-j'])) || {};
+  const simList = getSimulatorListCached();
   const devices = simList.devices || {};
   for (const runtime of Object.keys(devices)) {
     for (const d of devices[runtime] || []) {
@@ -224,9 +338,48 @@ function resolveSimulatorUdid(nameOrUdid) {
   return null;
 }
 
-// Get booted simulator UDID or null
+// Resolve simulator UDID, or create one if missing. When interactive, prompt for device type/runtime. Returns Promise<udid|null>.
+async function resolveOrCreateSimulator(nameOrUdid, options = {}) {
+  const { createIfMissing = true, interactive = false } = options;
+  let udid = resolveSimulatorUdid(nameOrUdid);
+  if (udid) return udid;
+  if (!createIfMissing && !interactive) return null;
+
+  const deviceTypes = getDeviceTypesList();
+  const runtimes = getRuntimesList();
+  let deviceType = findDeviceTypeByName(deviceTypes, nameOrUdid);
+
+  if (!deviceType) {
+    if (interactive && deviceTypes.length > 0) {
+      const choice = await promptSelect(`Simulator "${nameOrUdid}" not found. Choose a device type to create:`, deviceTypes, deviceTypes[0].name);
+      deviceType = deviceTypes.find(d => d.name === choice) || deviceTypes[0];
+    } else {
+      return null;
+    }
+  }
+
+  const runtimesForDevice = findRuntimesForDeviceType(runtimes, deviceType.identifier);
+  if (runtimesForDevice.length === 0) {
+    return null;
+  }
+  let runtime = runtimesForDevice[0];
+  if (interactive && runtimesForDevice.length > 1) {
+    const choice = await promptSelect('Choose iOS runtime:', runtimesForDevice, (runtimesForDevice[0] && runtimesForDevice[0].name) || null);
+    runtime = runtimesForDevice.find(r => r.name === choice || r.version === choice) || runtimesForDevice[0];
+  }
+
+  try {
+    const newUdid = createSimulator(nameOrUdid, deviceType.identifier, runtime.identifier);
+    return newUdid || resolveSimulatorUdid(nameOrUdid);
+  } catch (err) {
+    console.error(err.message || err);
+    return null;
+  }
+}
+
+// Get booted simulator UDID or null (uses cache)
 function getBootedSimulatorUdid() {
-  const simList = parseJsonOutput(getCommandOutput('xcrun', ['simctl', 'list', '-j'])) || {};
+  const simList = getSimulatorListCached();
   const devices = simList.devices || {};
   for (const runtime of Object.keys(devices)) {
     for (const d of devices[runtime] || []) {
@@ -236,12 +389,12 @@ function getBootedSimulatorUdid() {
   return null;
 }
 
-// Validate simulator name/UDID: null if valid, or error message if not found/unavailable
+// Validate simulator name/UDID: null if valid, or error message if not found/unavailable (uses cache)
 function validateSimulatorDestination(simulator) {
   if (!simulator) return null;
   const udid = resolveSimulatorUdid(simulator);
   if (!udid) return `Simulator "${simulator}" not found.`;
-  const simList = parseJsonOutput(getCommandOutput('xcrun', ['simctl', 'list', '-j'])) || {};
+  const simList = getSimulatorListCached();
   const devices = simList.devices || {};
   for (const runtime of Object.keys(devices)) {
     for (const d of devices[runtime] || []) {
@@ -257,6 +410,37 @@ function validateSimulatorDestination(simulator) {
 }
 
 const DESTINATION_ERROR_HINT = 'Run `zepta simulator list` to see available simulators, or `zepta init` to choose a different destination.';
+
+// Expand short test identifier to full (e.g. "LoginTests/testValidLogin" -> "MyAppTests/LoginTests/testValidLogin")
+function expandTestIdentifier(scheme, value) {
+  if (!value || typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  const schemeClean = (scheme || 'App').replace(/[^a-zA-Z0-9.-]/g, '');
+  const targetPrefix = schemeClean + 'Tests/';
+  // Already full form: starts with SchemeTests/ (e.g. MyAppTests/ClassName/method)
+  if (trimmed.startsWith(targetPrefix)) return trimmed;
+  return targetPrefix + trimmed;
+}
+
+// Parse xcodebuild test output for "Test Case '...' passed/failed (X seconds)". Returns { passed: [], failed: [], total }
+function parseTestOutput(text) {
+  const lines = (text || '').split('\n');
+  const passed = [];
+  const failed = [];
+  // Matches: Test Case '-[Target.Class method]' passed (0.123 seconds).  or  Test Case 'Class/method' passed (0.1 seconds).
+  const re = /Test Case\s+'([^']+)'\s+(passed|failed)(?:\s+\(([\d.]+)\s+seconds\))?/;
+  for (const line of lines) {
+    const m = line.match(re);
+    if (m) {
+      const ident = m[1];
+      const duration = m[3] ? parseFloat(m[3], 10) : 0;
+      if (m[2] === 'passed') passed.push({ identifier: ident, duration });
+      else failed.push({ identifier: ident, duration });
+    }
+  }
+  return { passed, failed, total: passed.length + failed.length };
+}
 
 // Derive .app path from derived data and scheme (approximate)
 function getBuiltAppPath(derivedDataPath, scheme, configuration, forSimulator) {
@@ -305,17 +489,11 @@ function discoverWorkspaces(projectDir) {
 }
 
 function getSchemesForWorkspace(projectDir, workspace) {
-  const wp = path.isAbsolute(workspace) ? workspace : path.join(projectDir, workspace);
-  const listArgs = ['-list', wp.endsWith('.xcworkspace') ? '-workspace' : '-project', wp];
-  let listOutput = '';
-  try {
-    listOutput = getCommandOutput('xcodebuild', listArgs, { cwd: projectDir });
-  } catch (_) {
-    return [];
-  }
-  const listJson = parseJsonOutput(listOutput);
+  const cached = getXcodeListCached(projectDir, workspace);
+  const listOutput = cached.listOutput || '';
+  const listJson = cached.listJson || {};
   let schemeList = [];
-  if (listJson && listJson.project && listJson.project.schemes) {
+  if (listJson.project && listJson.project.schemes) {
     schemeList = listJson.project.schemes.map(s => (typeof s === 'string' ? s : s.name));
   }
   if (schemeList.length === 0) {
@@ -326,7 +504,7 @@ function getSchemesForWorkspace(projectDir, workspace) {
 }
 
 function getSimulatorsForInit() {
-  const simList = parseJsonOutput(getCommandOutput('xcrun', ['simctl', 'list', '-j'])) || {};
+  const simList = getSimulatorListCached();
   const devices = simList.devices || {};
   const flat = [];
   for (const runtime of Object.keys(devices)) {
@@ -463,21 +641,12 @@ const commands = {
     const workspace = getOption('workspace');
     const json = getOption('json');
 
-    const listArgs = ['-list'];
-    if (workspace) {
-      const wp = path.isAbsolute(workspace) ? workspace : path.join(projectDir, workspace);
-      listArgs.push(wp.endsWith('.xcworkspace') ? '-workspace' : '-project', wp);
-    }
-    let listOutput = '';
-    try {
-      listOutput = getCommandOutput('xcodebuild', listArgs, { cwd: projectDir });
-    } catch (_) {
-      listOutput = getCommandOutput('xcodebuild', ['-list'], { cwd: projectDir });
-    }
-    const listJson = parseJsonOutput(listOutput);
+    const cachedList = getXcodeListCached(projectDir, workspace);
+    const listOutput = cachedList.listOutput || '';
+    const listJson = cachedList.listJson || {};
     let schemeList = [];
     let buildConfigurations = [];
-    if (listJson && listJson.project) {
+    if (listJson.project) {
       const proj = listJson.project;
       buildConfigurations = proj.buildConfigurations || [];
       const schemes = proj.schemes || [];
@@ -494,7 +663,7 @@ const commands = {
       if (buildConfigurations.length === 0 && listOutput.includes('Debug')) buildConfigurations = ['Debug', 'Release'];
     }
 
-    const simList = parseJsonOutput(getCommandOutput('xcrun', ['simctl', 'list', '-j'])) || {};
+    const simList = getSimulatorListCached();
     const devices = simList.devices || {};
     const simulators = Object.keys(devices).flatMap(k => (devices[k] || []).map(d => ({
       name: d.name,
@@ -525,7 +694,7 @@ const commands = {
     }
   },
 
-  build: () => {
+  build: async () => {
     if (getOption('examples')) {
       showExamples('build', [
         'zepta build',
@@ -555,11 +724,16 @@ const commands = {
 
     let destination;
     if (simulator) {
-      const simErr = validateSimulatorDestination(simulator);
+      let simErr = validateSimulatorDestination(simulator);
       if (simErr) {
-        console.error(simErr);
-        console.error(DESTINATION_ERROR_HINT);
-        process.exit(1);
+        const createIfMissing = getOption('createsimulator') || (process.stdin.isTTY && !json);
+        const interactive = process.stdin.isTTY && !json;
+        const udid = await resolveOrCreateSimulator(simulator, { createIfMissing, interactive });
+        if (!udid) {
+          console.error(simErr);
+          console.error(DESTINATION_ERROR_HINT);
+          process.exit(1);
+        }
       }
       destination = `platform=iOS Simulator,name=${simulator}`;
     } else if (device === 'My Mac') {
@@ -599,16 +773,24 @@ const commands = {
 
     const startTime = Date.now();
     if (json) {
-      console.log(JSON.stringify({ type: 'status', stage: 'COMPILING', message: 'Compiling sources...' }));
-      runCommand('xcodebuild', args, { stdio: verbose ? 'inherit' : 'pipe' });
+      console.log(JSON.stringify({ type: 'build_started', scheme, destination: destination }));
+      const run = runCommandNoExit('xcodebuild', args, { cwd: projectDir });
       const duration = (Date.now() - startTime) / 1000;
-      console.log(JSON.stringify({ type: 'result', success: true, operation: 'build', duration }));
+      const combined = (run.stdout || '') + '\n' + (run.stderr || '');
+      const errors = parseBuildErrors(combined);
+      errors.forEach(e => console.log(JSON.stringify({ type: 'error', file: e.file, line: e.line, column: e.column, message: e.message, severity: e.severity })));
+      console.log(JSON.stringify({ type: 'build_completed', success: run.status === 0, duration }));
+      if (run.status !== 0) {
+        if (!verbose && run.stderr) console.error(run.stderr);
+        if (run.error) console.error(run.error);
+        process.exit(1);
+      }
     } else {
       runCommand('xcodebuild', args);
     }
   },
 
-  run: () => {
+  run: async () => {
     if (getOption('examples')) {
       showExamples('run', [
         'zepta run',
@@ -619,27 +801,43 @@ const commands = {
       ]);
     }
 
-    const workspace = getOption('workspace');
-    const scheme = getOption('scheme');
+    let workspace = getOption('workspace');
+    let scheme = getOption('scheme');
     const configuration = getOption('configuration') || 'Debug';
     const simulator = getOption('simulator');
     const device = getOption('device');
     const derivedData = getOption('deriveddatapath') || defaultDerivedData;
     const noBuild = getOption('nobuild');
     const json = getOption('json');
+    const projectDir = getOption('project') || process.cwd();
 
+    // Auto-discover workspace and scheme when missing so "zepta run -S iPhone 16" works without init
     if (!workspace || !scheme) {
-      console.error('Specify -w/--workspace and -s/--scheme (or run zepta init)');
-      process.exit(1);
+      const workspaces = discoverWorkspaces(projectDir);
+      if (!workspace) {
+        if (workspaces.length === 0) {
+          console.error('No .xcworkspace or .xcodeproj found. Run from project root or use -w/--workspace.');
+          process.exit(1);
+        }
+        workspace = workspaces.find(w => w.endsWith('.xcworkspace')) || workspaces[0];
+      }
+      if (!scheme) {
+        const schemes = getSchemesForWorkspace(projectDir, workspace);
+        if (!schemes.length) {
+          console.error(`No schemes found for ${workspace}. Specify -s/--scheme.`);
+          process.exit(1);
+        }
+        scheme = typeof schemes[0] === 'object' && schemes[0] != null && schemes[0].name != null ? schemes[0].name : schemes[0];
+      }
     }
+
     if (!simulator && !device) {
       console.error('Specify -S/--simulator or -D/--device (or run zepta init with -S or -D)');
       process.exit(1);
     }
 
-    if (!noBuild) commands.build();
+    if (!noBuild) await commands.build();
 
-    const projectDir = getOption('project') || process.cwd();
     const workspacePath = path.isAbsolute(workspace) ? workspace : path.join(projectDir, workspace);
     const forSimulator = !!simulator;
     let appPath = getBuiltAppPath(derivedData, scheme, configuration, forSimulator);
@@ -654,10 +852,15 @@ const commands = {
     const launchEnv = getOption('launchenv');
 
     if (simulator) {
-      const udid = resolveSimulatorUdid(simulator);
+      let udid = resolveSimulatorUdid(simulator);
       if (!udid) {
-        console.error(`Simulator not found: ${simulator}`);
-        process.exit(1);
+        const createIfMissing = getOption('createsimulator') || (process.stdin.isTTY && !json);
+        const interactive = process.stdin.isTTY && !json;
+        udid = await resolveOrCreateSimulator(simulator, { createIfMissing, interactive });
+        if (!udid) {
+          console.error(`Simulator not found: ${simulator}`);
+          process.exit(1);
+        }
       }
       runCommand('xcrun', ['simctl', 'boot', udid]);
       if (fs.existsSync(appPath)) runCommand('xcrun', ['simctl', 'install', udid, appPath]);
@@ -687,7 +890,7 @@ const commands = {
     if (json) console.log(JSON.stringify({ type: 'result', success: true, operation: 'run' }));
   },
 
-  test: () => {
+  test: async () => {
     if (getOption('examples')) {
       showExamples('test', [
         'zepta test',
@@ -780,11 +983,16 @@ const commands = {
       process.exit(1);
     }
     if (simulator) {
-      const simErr = validateSimulatorDestination(simulator);
+      let simErr = validateSimulatorDestination(simulator);
       if (simErr) {
-        console.error(simErr);
-        console.error(DESTINATION_ERROR_HINT);
-        process.exit(1);
+        const createIfMissing = getOption('createsimulator') || (process.stdin.isTTY && !json);
+        const interactive = process.stdin.isTTY && !json;
+        const udid = await resolveOrCreateSimulator(simulator, { createIfMissing, interactive });
+        if (!udid) {
+          console.error(simErr);
+          console.error(DESTINATION_ERROR_HINT);
+          process.exit(1);
+        }
       }
     }
     const destination = simulator ? `platform=iOS Simulator,name=${simulator}` : (device === 'My Mac' ? 'platform=macOS' : `platform=iOS,name=${device}`);
@@ -795,8 +1003,8 @@ const commands = {
     const skip = getOption('skip');
     const plan = getOption('plan');
     const testTargets = getOption('testtargets');
-    if (only && typeof only === 'string') only.split(',').forEach(t => { args.push('-only-testing', t.trim()); });
-    if (skip && typeof skip === 'string') skip.split(',').forEach(t => { args.push('-skip-testing', t.trim()); });
+    if (only && typeof only === 'string') only.split(',').forEach(t => { args.push('-only-testing', expandTestIdentifier(scheme, t)); });
+    if (skip && typeof skip === 'string') skip.split(',').forEach(t => { args.push('-skip-testing', expandTestIdentifier(scheme, t)); });
     if (plan && typeof plan === 'string') args.push('-testPlan', plan);
     if (testTargets && typeof testTargets === 'string') args.push('-only-testing', testTargets);
     const xcodebuildOpts = getOption('xcodebuildoptions');
@@ -814,9 +1022,27 @@ const commands = {
       console.log(JSON.stringify({ type: 'status', stage: 'COMPILING', message: 'Building for testing...' }));
       console.log(JSON.stringify({ type: 'status', stage: 'TESTING', message: `Running tests on ${simulator || device}` }));
       const startTime = Date.now();
-      runCommand('xcodebuild', args, { stdio: verbose ? 'inherit' : 'pipe' });
+      const run = runCommandNoExit('xcodebuild', args, { cwd: projectDir });
       const duration = (Date.now() - startTime) / 1000;
-      console.log(JSON.stringify({ type: 'result', success: true, operation: 'test', totalTests: 1, passedTests: 1, failedTests: 0, skippedTests: 0, duration }));
+      const combined = (run.stdout || '') + '\n' + (run.stderr || '');
+      const parsed = parseTestOutput(combined);
+      parsed.passed.forEach(t => console.log(JSON.stringify({ type: 'test_passed', testName: t.identifier, duration: t.duration })));
+      parsed.failed.forEach(t => console.log(JSON.stringify({ type: 'test_failed', testName: t.identifier, duration: t.duration })));
+      const success = run.status === 0;
+      console.log(JSON.stringify({
+        type: 'result',
+        success,
+        operation: 'test',
+        totalTests: parsed.total,
+        passedTests: parsed.passed.length,
+        failedTests: parsed.failed.length,
+        skippedTests: 0,
+        duration
+      }));
+      if (run.status !== 0) {
+        if (!verbose && run.stderr) console.error(run.stderr);
+        process.exit(1);
+      }
     } else {
       runCommand('xcodebuild', args);
     }
@@ -993,13 +1219,14 @@ const commands = {
     }
   },
 
-  simulator: () => {
+  simulator: async () => {
     const sub = parsedArgs.subcommand || 'list';
     if (getOption('examples')) {
       showExamples('simulator', [
         'zepta simulator list',
         'zepta simulator list -P iOS --available-only --json',
         'zepta simulator boot "iPhone 16"',
+        'zepta simulator create "iPhone 16"',
         'zepta simulator shutdown <UDID>',
         'zepta simulator open'
       ]);
@@ -1010,7 +1237,7 @@ const commands = {
       const platform = getOption('platform');
       const availableOnly = getOption('availableonly');
 
-      const simOutput = parseJsonOutput(getCommandOutput('xcrun', ['simctl', 'list', '-j'])) || {};
+      const simOutput = getSimulatorListCached();
       let devices = simOutput.devices || {};
       if (platform) {
         devices = Object.fromEntries(Object.entries(devices).filter(([k]) => k.toLowerCase().includes(String(platform).toLowerCase())));
@@ -1062,8 +1289,22 @@ const commands = {
     } else if (sub === 'open') {
       spawnSync('open', ['-a', 'Simulator']);
       if (getOption('json')) console.log(JSON.stringify({ success: true }));
+    } else if (sub === 'create') {
+      const name = parsedArgs.args[0];
+      if (!name) {
+        console.error('Usage: zepta simulator create <name> (e.g. "iPhone 16")');
+        process.exit(1);
+      }
+      const interactive = process.stdin.isTTY && !getOption('json');
+      const udid = await resolveOrCreateSimulator(name, { createIfMissing: true, interactive });
+      if (!udid) {
+        console.error('Could not create simulator. Install the required runtime in Xcode.');
+        process.exit(1);
+      }
+      if (getOption('json')) console.log(JSON.stringify({ success: true, udid, name }));
+      else console.log('Created simulator:', name, '(' + udid + ')');
     } else {
-      console.error('Unknown simulator subcommand. Use: list, boot, shutdown, open');
+      console.error('Unknown simulator subcommand. Use: list, boot, create, shutdown, open');
       process.exit(1);
     }
   },
@@ -1356,6 +1597,7 @@ function showHelp() {
   console.log('Other: license, update');
   console.log('');
   console.log('Common options: -w/--workspace, -s/--scheme, -S/--simulator, -D/--device, -C/--configuration, -d/--derived-data-path, --json, --examples');
+  console.log('Simulator: --create-simulator (create if missing); interactive when TTY (choose device type/runtime)');
   console.log('Global: -h/--help, --version');
   process.exit(0);
 }
@@ -1372,19 +1614,27 @@ function showVersion() {
 
 // Run CLI only when executed as main (allows Jest to require and test)
 if (require.main === module) {
-  if (parsedArgs.options.help || parsedArgs.options.version) {
-    if (parsedArgs.options.version) showVersion();
-    showHelp();
-  }
-  const cmd = parsedArgs.command;
-  if (cmd && commands[cmd]) {
-    commands[cmd]();
-  } else if (!cmd && (parsedArgs.options.help || parsedArgs.options.version)) {
-    // already handled above
-  } else {
-    console.log('Unknown command. Available: context, build, run, test, clean, logs, project, simulator, device, ui, license, update, init, stop, apps');
-    process.exit(1);
-  }
+  (async () => {
+    if (parsedArgs.options.help || parsedArgs.options.version) {
+      if (parsedArgs.options.version) showVersion();
+      showHelp();
+    }
+    const cmd = parsedArgs.command;
+    if (cmd && commands[cmd]) {
+      try {
+        const result = commands[cmd]();
+        if (result && typeof result.then === 'function') await result;
+      } catch (err) {
+        console.error(err.message || err);
+        process.exit(1);
+      }
+    } else if (!cmd && (parsedArgs.options.help || parsedArgs.options.version)) {
+      // already handled above
+    } else {
+      console.log('Unknown command. Available: context, build, run, test, clean, logs, project, simulator, device, ui, license, update, init, stop, apps');
+      process.exit(1);
+    }
+  })();
 }
 
 module.exports = {
@@ -1396,8 +1646,21 @@ module.exports = {
   getOption,
   commands,
   runCommand,
+  runCommandNoExit,
   getCommandOutput,
   parseJsonOutput,
+  parseBuildErrors,
+  parseTestOutput,
+  expandTestIdentifier,
+  getSimulatorListCached,
+  invalidateSimulatorCache,
+  getDeviceTypesList,
+  getRuntimesList,
+  findDeviceTypeByName,
+  findRuntimesForDeviceType,
+  createSimulator,
+  resolveOrCreateSimulator,
+  getXcodeListCached,
   resolveSimulatorUdid,
   validateSimulatorDestination,
   getBootedSimulatorUdid,

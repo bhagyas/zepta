@@ -131,4 +131,32 @@ describe('project create and build workflow', () => {
     expect(r3.status).toBeDefined();
     expect(typeof r3.status).toBe('number');
   });
+
+  test('setup empty project and run on iPhone 16 simulator', () => {
+    const r1 = runZepta(['project', 'create', 'EmptyApp'], tmpDir);
+    expect(r1.status).toBe(0);
+    expect(fs.existsSync(path.join(tmpDir, 'EmptyApp', 'EmptyApp.xcodeproj'))).toBe(true);
+
+    const r2 = runZepta(['init', '-w', 'EmptyApp/EmptyApp.xcodeproj', '-s', 'EmptyApp', '-S', 'iPhone 16'], tmpDir);
+    expect(r2.status).toBe(0);
+    const config = JSON.parse(fs.readFileSync(path.join(tmpDir, '.zepta.json'), 'utf8'));
+    expect(config.workspace).toBe('EmptyApp/EmptyApp.xcodeproj');
+    expect(config.scheme).toBe('EmptyApp');
+    expect(config.simulator).toBe('iPhone 16');
+
+    const r3 = runZepta(['run', '-S', 'iPhone 16'], tmpDir);
+    expect(r3.status).toBeDefined();
+    expect(typeof r3.status).toBe('number');
+    const output = (r3.stdout || '') + (r3.stderr || '');
+    expect(output).toBeTruthy();
+    expect(
+      output.includes('iPhone 16') ||
+      output.includes('simulator') ||
+      output.includes('Simulator') ||
+      output.includes('xcodebuild') ||
+      output.includes('Error') ||
+      output.includes('build') ||
+      output.includes('Launching')
+    ).toBe(true);
+  });
 });

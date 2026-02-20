@@ -47,6 +47,9 @@ zepta build
 zepta run
 zepta test
 zepta clean
+
+# Or from project root: run with just the simulator (workspace/scheme auto-discovered)
+zepta run -S "iPhone 16"
 ```
 
 ## Static CLI usage (recommended for agents)

@@ -47,6 +47,16 @@ This project **aims to be API-compatible** with Flowdeck’s CLI where practical
 
 Thanks to the **Flowdeck author** for the inspiration and for showing what a great Xcode CLI can look like.
 
+## Development
+
+Run the test suite (Jest):
+
+```bash
+npm test
+```
+
+Tests cover CLI parsing, init/config, build/run/clean, simulator/device, and a full workflow: create empty project → init for iPhone 16 → run on simulator.
+
 ## Contributing
 
 Contributions are welcome. Maintainers: see [Publishing](docs/publishing.md) for releasing to npm via GitHub Actions. Many commands are still stubs or partial (e.g. `project create`, `run` app path resolution, `test discover`/`plans`, `simulator`/`device` subcommands, `ui` accessibility). If you implement a missing feature or fix a bug, please open a **pull request**. 

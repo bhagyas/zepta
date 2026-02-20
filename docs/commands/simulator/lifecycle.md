@@ -1,6 +1,25 @@
 # Simulator lifecycle
 
-Boot, shutdown, and open simulators.
+Create, boot, shutdown, and open simulators.
+
+## zepta simulator create
+
+Create a simulator with the given name (e.g. "iPhone 16") if it doesn't exist. Uses `xcrun simctl create` with a matching device type and an available iOS runtime. When run in a TTY (and not `--json`), prompts to choose device type if the name doesn't match exactly, and to choose iOS runtime if multiple are available.
+
+### Examples
+
+```bash
+zepta simulator create "iPhone 16"
+zepta simulator create "iPhone 16 Pro" --json
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--json` | `-j` Output JSON with udid and name |
+
+---
 
 ## zepta simulator boot
 
