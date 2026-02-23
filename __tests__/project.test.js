@@ -66,4 +66,45 @@ describe('project packages', () => {
     const r = runZepta(['project', 'packages', 'list']);
     expect(r.status).toBe(0);
   });
+
+  test('project packages clear --json exits 0', () => {
+    const r = runZepta(['project', 'packages', 'clear', '--json']);
+    expect(r.status).toBe(0);
+    const data = JSON.parse(r.stdout.trim());
+    expect(data).toHaveProperty('success', true);
+    expect(data).toHaveProperty('action', 'clear');
+  });
+
+  test('project packages add without dependency exits non-zero', () => {
+    const r = runZepta(['project', 'packages', 'add']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr || r.stdout).toMatch(/Usage: zepta project packages add/);
+  });
+
+  test('project packages link without path exits non-zero', () => {
+    const r = runZepta(['project', 'packages', 'link']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr || r.stdout).toMatch(/Usage: zepta project packages link/);
+  });
+
+  test('project packages remove without token exits non-zero', () => {
+    const r = runZepta(['project', 'packages', 'remove']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr || r.stdout).toMatch(/Usage: zepta project packages remove/);
+  });
+});
+
+describe('project sync-profiles', () => {
+  test('sync-profiles without required flags exits non-zero', () => {
+    const r = runZepta(['project', 'sync-profiles']);
+    expect(r.status).not.toBe(0);
+  });
+
+  test('sync-profiles dry-run returns success JSON and command', () => {
+    const r = runZepta(['project', 'sync-profiles', '-w', 'App.xcworkspace', '-s', 'App', '--dry-run', '--json']);
+    expect(r.status).toBe(0);
+    const lines = r.stdout.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    expect(lines.some(l => l.type === 'command' && /xcodebuild/.test(l.command))).toBe(true);
+    expect(lines.some(l => l.action === 'sync-profiles' && l.success === true)).toBe(true);
+  });
 });

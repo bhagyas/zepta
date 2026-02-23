@@ -40,6 +40,25 @@ function runCommandNoExit(cmd, args = [], options = {}) {
   };
 }
 
+function parseEnvPairs(value) {
+  if (!value || typeof value !== 'string') return {};
+  return value.split(/\s+/).reduce((acc, pair) => {
+    const idx = pair.indexOf('=');
+    if (idx > 0) acc[pair.slice(0, idx)] = pair.slice(idx + 1);
+    return acc;
+  }, {});
+}
+
+function quoteArg(arg) {
+  const s = String(arg);
+  if (/^[A-Za-z0-9_./:=-]+$/.test(s)) return s;
+  return `"${s.replace(/(["\\$`])/g, '\\$1')}"`;
+}
+
+function formatCommand(cmd, args = []) {
+  return [cmd, ...args.map(quoteArg)].join(' ');
+}
+
 // Parse Swift/Clang error and warning lines from xcodebuild output. Returns array of { file, line, column, message, severity }.
 function parseBuildErrors(text) {
   const lines = (text || '').split('\n');
@@ -153,6 +172,7 @@ function parseJsonOutput(output) {
 // Default config file name (FlowDeck-style: init then run without params)
 const CONFIG_FILENAME = '.zepta.json';
 const LAUNCHED_APPS_FILE = path.join(os.homedir(), '.zepta-launched-apps.json');
+const UI_SESSION_FILE = path.join(os.homedir(), '.zepta-ui-session.json');
 
 function readLaunchedApps() {
   try {
@@ -182,6 +202,25 @@ function clearLaunchedApp(bundleId) {
 function clearAllLaunchedApps() {
   try {
     fs.writeFileSync(LAUNCHED_APPS_FILE, JSON.stringify({ apps: [] }, null, 2));
+  } catch (_) {}
+}
+
+function readUiSession() {
+  try {
+    if (fs.existsSync(UI_SESSION_FILE)) return JSON.parse(fs.readFileSync(UI_SESSION_FILE, 'utf8'));
+  } catch (_) {}
+  return null;
+}
+
+function writeUiSession(session) {
+  try {
+    fs.writeFileSync(UI_SESSION_FILE, JSON.stringify(session, null, 2));
+  } catch (_) {}
+}
+
+function clearUiSession() {
+  try {
+    if (fs.existsSync(UI_SESSION_FILE)) fs.unlinkSync(UI_SESSION_FILE);
   } catch (_) {}
 }
 
@@ -473,6 +512,16 @@ function showExamples(command, examples) {
   process.exit(0);
 }
 
+async function resolveSimulatorInputOrPrompt(nameOrUdid, jsonOut) {
+  if (nameOrUdid) return resolveSimulatorUdid(nameOrUdid) || nameOrUdid;
+  if (!process.stdin.isTTY || jsonOut) return null;
+  const sims = getSimulatorsForInit();
+  if (!sims.length) return null;
+  const defaultSim = sims.find(s => s.state === 'Booted') || sims[0];
+  const chosen = await promptSelect('Select simulator:', sims, defaultSim.name);
+  return resolveSimulatorUdid(chosen) || chosen;
+}
+
 // --- Interactive init: discover and prompt (only when stdin is TTY and not --json) ---
 
 function discoverWorkspaces(projectDir) {
@@ -557,6 +606,19 @@ function promptSelect(message, choices, defaultValue) {
       } else {
         reject(new Error('Invalid selection'));
       }
+    });
+  });
+}
+
+function promptText(message, defaultValue) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const prompt = `${message}${defaultValue != null ? ` [${defaultValue}]` : ''}: `;
+    rl.question(prompt, (answer) => {
+      rl.close();
+      const out = (answer || '').trim();
+      if (out) resolve(out);
+      else resolve(defaultValue != null ? String(defaultValue) : '');
     });
   });
 }
@@ -712,6 +774,8 @@ const commands = {
     const derivedData = getOption('deriveddatapath') || defaultDerivedData;
     const json = getOption('json');
     const verbose = getOption('verbose');
+    const dryRun = !!getOption('dryrun');
+    const printCommand = !!getOption('printcommand');
 
     if (!workspace && !getOption('project')) {
       console.error('Specify -w/--workspace (or run zepta init -w <workspace> -s <scheme> -S "<simulator>")');
@@ -724,15 +788,17 @@ const commands = {
 
     let destination;
     if (simulator) {
-      let simErr = validateSimulatorDestination(simulator);
-      if (simErr) {
-        const createIfMissing = getOption('createsimulator') || (process.stdin.isTTY && !json);
-        const interactive = process.stdin.isTTY && !json;
-        const udid = await resolveOrCreateSimulator(simulator, { createIfMissing, interactive });
-        if (!udid) {
-          console.error(simErr);
-          console.error(DESTINATION_ERROR_HINT);
-          process.exit(1);
+      if (!dryRun) {
+        let simErr = validateSimulatorDestination(simulator);
+        if (simErr) {
+          const createIfMissing = getOption('createsimulator') || (process.stdin.isTTY && !json);
+          const interactive = process.stdin.isTTY && !json;
+          const udid = await resolveOrCreateSimulator(simulator, { createIfMissing, interactive });
+          if (!udid) {
+            console.error(simErr);
+            console.error(DESTINATION_ERROR_HINT);
+            process.exit(1);
+          }
         }
       }
       destination = `platform=iOS Simulator,name=${simulator}`;
@@ -762,19 +828,22 @@ const commands = {
 
     const xcodebuildOpts = getOption('xcodebuildoptions');
     if (xcodebuildOpts && typeof xcodebuildOpts === 'string') args.push(...xcodebuildOpts.split(/\s+/).filter(Boolean));
-    const xcodebuildEnv = getOption('xcodebuildenv');
-    if (xcodebuildEnv && typeof xcodebuildEnv === 'string') {
-      Object.assign(process.env, xcodebuildEnv.split(/\s+/).reduce((acc, pair) => {
-        const idx = pair.indexOf('=');
-        if (idx > 0) acc[pair.slice(0, idx)] = pair.slice(idx + 1);
-        return acc;
-      }, {}));
+    const xcodeEnv = { ...process.env, ...parseEnvPairs(getOption('xcodebuildenv')) };
+
+    if (printCommand || dryRun) {
+      const cmd = formatCommand('xcodebuild', args);
+      if (json) console.log(JSON.stringify({ type: 'command', command: cmd, dryRun }));
+      else console.log(cmd);
+    }
+    if (dryRun) {
+      if (json) console.log(JSON.stringify({ type: 'build_completed', success: true, duration: 0, dryRun: true }));
+      return;
     }
 
     const startTime = Date.now();
     if (json) {
       console.log(JSON.stringify({ type: 'build_started', scheme, destination: destination }));
-      const run = runCommandNoExit('xcodebuild', args, { cwd: projectDir });
+      const run = runCommandNoExit('xcodebuild', args, { cwd: projectDir, env: xcodeEnv });
       const duration = (Date.now() - startTime) / 1000;
       const combined = (run.stdout || '') + '\n' + (run.stderr || '');
       const errors = parseBuildErrors(combined);
@@ -786,7 +855,7 @@ const commands = {
         process.exit(1);
       }
     } else {
-      runCommand('xcodebuild', args);
+      runCommand('xcodebuild', args, { cwd: projectDir, env: xcodeEnv, stdio: verbose ? 'inherit' : 'inherit' });
     }
   },
 
@@ -810,6 +879,8 @@ const commands = {
     const noBuild = getOption('nobuild');
     const json = getOption('json');
     const projectDir = getOption('project') || process.cwd();
+    const dryRun = !!getOption('dryrun');
+    const printCommand = !!getOption('printcommand');
 
     // Auto-discover workspace and scheme when missing so "zepta run -S iPhone 16" works without init
     if (!workspace || !scheme) {
@@ -838,7 +909,6 @@ const commands = {
 
     if (!noBuild) await commands.build();
 
-    const workspacePath = path.isAbsolute(workspace) ? workspace : path.join(projectDir, workspace);
     const forSimulator = !!simulator;
     let appPath = getBuiltAppPath(derivedData, scheme, configuration, forSimulator);
     let bundleId = getOption('bundleid');
@@ -853,7 +923,7 @@ const commands = {
 
     if (simulator) {
       let udid = resolveSimulatorUdid(simulator);
-      if (!udid) {
+      if (!udid && !dryRun) {
         const createIfMissing = getOption('createsimulator') || (process.stdin.isTTY && !json);
         const interactive = process.stdin.isTTY && !json;
         udid = await resolveOrCreateSimulator(simulator, { createIfMissing, interactive });
@@ -862,32 +932,48 @@ const commands = {
           process.exit(1);
         }
       }
-      runCommand('xcrun', ['simctl', 'boot', udid]);
-      if (fs.existsSync(appPath)) runCommand('xcrun', ['simctl', 'install', udid, appPath]);
+      if (!udid) udid = simulator;
+      const bootCmd = ['simctl', 'boot', udid];
+      const installCmd = ['simctl', 'install', udid, appPath];
       const launchArgs = [udid, bundleId];
-      const prevEnv = { ...process.env };
-      if (launchEnv && typeof launchEnv === 'string') {
-        launchEnv.split(/\s+/).forEach(pair => {
-          const idx = pair.indexOf('=');
-          if (idx > 0) process.env[`SIMCTL_CHILD_${pair.slice(0, idx)}`] = pair.slice(idx + 1);
-        });
-      }
+      const launchEnvPairs = parseEnvPairs(launchEnv);
+      const launchProcEnv = {
+        ...process.env,
+        ...Object.fromEntries(Object.entries(launchEnvPairs).map(([k, v]) => [`SIMCTL_CHILD_${k}`, v]))
+      };
       if (launchOpts && typeof launchOpts === 'string') launchArgs.push(...launchOpts.split(/\s+/).filter(Boolean));
-      if (json) console.log(JSON.stringify({ type: 'status', stage: 'LAUNCHING', message: `Launching on ${simulator}` }));
-      runCommand('xcrun', ['simctl', 'launch', ...launchArgs]);
-      Object.keys(process.env).filter(k => k.startsWith('SIMCTL_CHILD_')).forEach(k => delete process.env[k]);
-      Object.assign(process.env, prevEnv);
-      trackLaunchedApp(bundleId, udid);
+      const launchCmd = ['simctl', 'launch', ...launchArgs];
+      if (printCommand || dryRun) {
+        const cmds = [bootCmd, installCmd, launchCmd].map(args => formatCommand('xcrun', args));
+        if (json) cmds.forEach(c => console.log(JSON.stringify({ type: 'command', command: c, dryRun })));
+        else cmds.forEach(c => console.log(c));
+      }
+      if (!dryRun) {
+        runCommand('xcrun', bootCmd);
+        if (fs.existsSync(appPath)) runCommand('xcrun', installCmd);
+        if (json) console.log(JSON.stringify({ type: 'status', stage: 'LAUNCHING', message: `Launching on ${simulator}` }));
+        runCommand('xcrun', launchCmd, { env: launchProcEnv });
+        trackLaunchedApp(bundleId, udid);
+      }
     } else {
       const udid = device;
-      if (json) console.log(JSON.stringify({ type: 'status', stage: 'LAUNCHING', message: `Launching on ${device}` }));
-      if (fs.existsSync(appPath)) runCommand('xcrun', ['devicectl', 'device', 'install', 'app', appPath, '--device', udid]);
-      runCommand('xcrun', ['devicectl', 'device', 'process', 'launch', bundleId, '--device', udid]);
+      const installCmd = ['devicectl', 'device', 'install', 'app', appPath, '--device', udid];
+      const launchCmd = ['devicectl', 'device', 'process', 'launch', bundleId, '--device', udid];
+      if (printCommand || dryRun) {
+        const cmds = [installCmd, launchCmd].map(args => formatCommand('xcrun', args));
+        if (json) cmds.forEach(c => console.log(JSON.stringify({ type: 'command', command: c, dryRun })));
+        else cmds.forEach(c => console.log(c));
+      }
+      if (!dryRun) {
+        if (json) console.log(JSON.stringify({ type: 'status', stage: 'LAUNCHING', message: `Launching on ${device}` }));
+        if (fs.existsSync(appPath)) runCommand('xcrun', installCmd);
+        runCommand('xcrun', launchCmd);
+      }
     }
 
-    if (getOption('log')) commands.logs();
+    if (getOption('log') && !dryRun) commands.logs();
 
-    if (json) console.log(JSON.stringify({ type: 'result', success: true, operation: 'run' }));
+    if (json) console.log(JSON.stringify({ type: 'result', success: true, operation: 'run', dryRun }));
   },
 
   test: async () => {
@@ -978,11 +1064,13 @@ const commands = {
     const configuration = getOption('configuration') || 'Debug';
     const json = getOption('json');
     const verbose = getOption('verbose');
+    const dryRun = !!getOption('dryrun');
+    const printCommand = !!getOption('printcommand');
     if (!simulator && !device) {
       console.error('Specify -S/--simulator or -D/--device for testing');
       process.exit(1);
     }
-    if (simulator) {
+    if (simulator && !dryRun) {
       let simErr = validateSimulatorDestination(simulator);
       if (simErr) {
         const createIfMissing = getOption('createsimulator') || (process.stdin.isTTY && !json);
@@ -1009,20 +1097,35 @@ const commands = {
     if (testTargets && typeof testTargets === 'string') args.push('-only-testing', testTargets);
     const xcodebuildOpts = getOption('xcodebuildoptions');
     if (xcodebuildOpts && typeof xcodebuildOpts === 'string') args.push(...xcodebuildOpts.split(/\s+/).filter(Boolean));
-    const xcodebuildEnv = getOption('xcodebuildenv');
-    if (xcodebuildEnv && typeof xcodebuildEnv === 'string') {
-      Object.assign(process.env, xcodebuildEnv.split(/\s+/).reduce((acc, pair) => {
-        const idx = pair.indexOf('=');
-        if (idx > 0) acc[pair.slice(0, idx)] = pair.slice(idx + 1);
-        return acc;
-      }, {}));
+    const xcodeEnv = { ...process.env, ...parseEnvPairs(getOption('xcodebuildenv')) };
+
+    if (printCommand || dryRun) {
+      const cmd = formatCommand('xcodebuild', args);
+      if (json) console.log(JSON.stringify({ type: 'command', command: cmd, dryRun }));
+      else console.log(cmd);
+    }
+    if (dryRun) {
+      if (json) {
+        console.log(JSON.stringify({
+          type: 'result',
+          success: true,
+          operation: 'test',
+          totalTests: 0,
+          passedTests: 0,
+          failedTests: 0,
+          skippedTests: 0,
+          duration: 0,
+          dryRun: true
+        }));
+      }
+      return;
     }
 
     if (json) {
       console.log(JSON.stringify({ type: 'status', stage: 'COMPILING', message: 'Building for testing...' }));
       console.log(JSON.stringify({ type: 'status', stage: 'TESTING', message: `Running tests on ${simulator || device}` }));
       const startTime = Date.now();
-      const run = runCommandNoExit('xcodebuild', args, { cwd: projectDir });
+      const run = runCommandNoExit('xcodebuild', args, { cwd: projectDir, env: xcodeEnv });
       const duration = (Date.now() - startTime) / 1000;
       const combined = (run.stdout || '') + '\n' + (run.stderr || '');
       const parsed = parseTestOutput(combined);
@@ -1044,7 +1147,7 @@ const commands = {
         process.exit(1);
       }
     } else {
-      runCommand('xcodebuild', args);
+      runCommand('xcodebuild', args, { cwd: projectDir, env: xcodeEnv });
     }
   },
 
@@ -1121,19 +1224,23 @@ const commands = {
     cmd.stderr.on('data', (data) => process.stderr.write(data));
   },
 
-  project: () => {
+  project: async () => {
     const sub = parsedArgs.subcommand;
     if (getOption('examples')) {
       showExamples('project', [
         'zepta project create MyApp',
         'zepta project schemes -w App.xcworkspace --json',
         'zepta project configs -w App.xcworkspace --json',
-        'zepta project packages list'
+        'zepta project packages list',
+        'zepta project packages resolve -w App.xcworkspace -s App',
+        'zepta project packages clear --all',
+        'zepta project sync-profiles -w App.xcworkspace -s App'
       ]);
     }
 
     const projectDir = getOption('project') || process.cwd();
     const workspace = getOption('workspace');
+    const scheme = getOption('scheme');
     const wp = workspace && (path.isAbsolute(workspace) ? workspace : path.join(projectDir, workspace));
 
     if (sub === 'schemes') {
@@ -1180,14 +1287,148 @@ const commands = {
     if (sub === 'packages') {
       const pkgSub = parsedArgs.args[0] || 'list';
       const jsonOut = getOption('json');
+      const packageManifestPath = path.isAbsolute(getOption('manifest') || '')
+        ? getOption('manifest')
+        : path.join(projectDir, getOption('manifest') || 'Package.swift');
       if (pkgSub === 'list') {
         const list = [];
         if (jsonOut) console.log(JSON.stringify({ packages: list }));
         else console.log('No Swift packages or not implemented.');
+      } else if (pkgSub === 'resolve' || pkgSub === 'update') {
+        if (!workspace) {
+          console.error('Specify -w/--workspace for package resolution.');
+          process.exit(1);
+        }
+        const workspacePath = path.isAbsolute(workspace) ? workspace : path.join(projectDir, workspace);
+        const useWorkspace = workspacePath.endsWith('.xcworkspace');
+        const args = ['-resolvePackageDependencies', useWorkspace ? '-workspace' : '-project', workspacePath];
+        if (scheme) args.push('-scheme', scheme);
+        if (pkgSub === 'update') {
+          args.push('-disableAutomaticPackageResolution', 'NO');
+        }
+        const dryRun = !!getOption('dryrun');
+        const printCommand = !!getOption('printcommand');
+        const xcodeEnv = { ...process.env, ...parseEnvPairs(getOption('xcodebuildenv')) };
+        if (printCommand || dryRun) {
+          const cmd = formatCommand('xcodebuild', args);
+          if (jsonOut) console.log(JSON.stringify({ type: 'command', command: cmd, dryRun }));
+          else console.log(cmd);
+        }
+        if (!dryRun) {
+          runCommand('xcodebuild', args, { stdio: getOption('verbose') ? 'inherit' : 'pipe', cwd: projectDir, env: xcodeEnv });
+        }
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: pkgSub }));
+      } else if (pkgSub === 'clear') {
+        const all = getOption('all');
+        const derivedData = getOption('deriveddatapath') || defaultDerivedData;
+        const paths = [path.join(derivedData, 'SourcePackages')];
+        if (all) {
+          paths.push(path.join(os.homedir(), 'Library/Caches/org.swift.swiftpm'));
+          paths.push(path.join(os.homedir(), 'Library/org.swift.swiftpm'));
+        }
+        paths.forEach(p => {
+          if (fs.existsSync(p)) runCommand('rm', ['-rf', p], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+        });
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: 'clear', cleared: paths }));
+        else console.log('Swift package cache cleared.');
+      } else if (pkgSub === 'add' || pkgSub === 'link') {
+        let input = parsedArgs.args[1] || getOption('url') || getOption('path');
+        if (!input && process.stdin.isTTY && !jsonOut) {
+          input = await promptText(pkgSub === 'link' ? 'Enter local package path' : 'Enter package URL or local path');
+        }
+        if (!input) {
+          console.error(`Usage: zepta project packages ${pkgSub} <url|path> [--from <version>|--exact <version>|--branch <branch>|--revision <sha>]`);
+          process.exit(1);
+        }
+        const isPath = pkgSub === 'link' || !!getOption('path') || input.startsWith('.') || input.startsWith('/') || input.startsWith('~');
+        if (!fs.existsSync(packageManifestPath)) {
+          console.error(`Package manifest not found at ${packageManifestPath}. Use --manifest or run from a Swift package root.`);
+          process.exit(1);
+        }
+        const manifestDir = path.dirname(packageManifestPath);
+        const swiftArgs = ['package', 'add-dependency'];
+        if (isPath) swiftArgs.push('--path', path.isAbsolute(input) ? input : path.resolve(projectDir, input));
+        else swiftArgs.push('--url', input);
+        if (getOption('from')) swiftArgs.push('--from', String(getOption('from')));
+        if (getOption('exact')) swiftArgs.push('--exact', String(getOption('exact')));
+        if (getOption('uptonextmajor')) swiftArgs.push('--up-to-next-major-from', String(getOption('uptonextmajor')));
+        if (getOption('uptonextminor')) swiftArgs.push('--up-to-next-minor-from', String(getOption('uptonextminor')));
+        if (getOption('branch')) swiftArgs.push('--branch', String(getOption('branch')));
+        if (getOption('revision')) swiftArgs.push('--revision', String(getOption('revision')));
+        runCommand('swift', swiftArgs, { cwd: manifestDir, stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: pkgSub, input, manifest: packageManifestPath }));
+        else console.log(`Package ${pkgSub} completed: ${input}`);
+      } else if (pkgSub === 'remove') {
+        let token = parsedArgs.args[1] || getOption('url') || getOption('name') || getOption('identity');
+        if (!token && process.stdin.isTTY && !jsonOut) token = await promptText('Enter dependency URL/name/identity to remove');
+        if (!token) {
+          console.error('Usage: zepta project packages remove <url|name|identity>');
+          process.exit(1);
+        }
+        if (!fs.existsSync(packageManifestPath)) {
+          console.error(`Package manifest not found at ${packageManifestPath}. Use --manifest or run from a Swift package root.`);
+          process.exit(1);
+        }
+        const original = fs.readFileSync(packageManifestPath, 'utf8');
+        const depToken = String(token).trim();
+        const depName = depToken.split('/').pop().replace(/\.git$/, '');
+        const lines = original.split('\n');
+        const filtered = lines.filter(line => {
+          if (!line.includes('.package(')) return true;
+          const normalized = line.replace(/\s+/g, ' ');
+          return !(normalized.includes(depToken) || normalized.includes(`name: "${depName}"`) || normalized.includes(`"${depName}"`));
+        });
+        if (filtered.length === lines.length) {
+          console.error(`Dependency not found in manifest: ${depToken}`);
+          process.exit(1);
+        }
+        fs.writeFileSync(packageManifestPath, filtered.join('\n'));
+        const manifestDir = path.dirname(packageManifestPath);
+        runCommandNoExit('swift', ['package', 'resolve'], { cwd: manifestDir });
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: 'remove', token: depToken, manifest: packageManifestPath }));
+        else console.log(`Removed dependency from manifest: ${depToken}`);
       } else {
         console.log(`zepta project packages ${pkgSub} is not implemented.`);
         if (jsonOut) console.log(JSON.stringify({ success: false, message: 'Not implemented' }));
       }
+      return;
+    }
+
+    if (sub === 'sync-profiles') {
+      if (!workspace || !scheme) {
+        console.error('Specify -w/--workspace and -s/--scheme for profile sync.');
+        process.exit(1);
+      }
+      const workspacePath = path.isAbsolute(workspace) ? workspace : path.join(projectDir, workspace);
+      const useWorkspace = workspacePath.endsWith('.xcworkspace');
+      const configuration = getOption('configuration') || 'Debug';
+      const destination = getOption('destination') || 'generic/platform=iOS';
+      const args = [
+        'build',
+        useWorkspace ? '-workspace' : '-project',
+        workspacePath,
+        '-scheme',
+        scheme,
+        '-configuration',
+        configuration,
+        '-destination',
+        destination,
+        '-allowProvisioningUpdates',
+        '-allowProvisioningDeviceRegistration'
+      ];
+      const extra = getOption('xcodebuildoptions');
+      if (extra && typeof extra === 'string') args.push(...extra.split(/\s+/).filter(Boolean));
+      const dryRun = !!getOption('dryrun');
+      const printCommand = !!getOption('printcommand');
+      const xcodeEnv = { ...process.env, ...parseEnvPairs(getOption('xcodebuildenv')) };
+      if (printCommand || dryRun) {
+        const cmd = formatCommand('xcodebuild', args);
+        if (getOption('json')) console.log(JSON.stringify({ type: 'command', command: cmd, dryRun }));
+        else console.log(cmd);
+      }
+      if (!dryRun) runCommand('xcodebuild', args, { stdio: getOption('verbose') ? 'inherit' : 'pipe', cwd: projectDir, env: xcodeEnv });
+      if (getOption('json')) console.log(JSON.stringify({ success: true, action: 'sync-profiles', workspace: workspacePath, scheme, configuration, destination }));
+      else console.log('Provisioning profile sync completed.');
       return;
     }
 
@@ -1227,6 +1468,16 @@ const commands = {
         'zepta simulator list -P iOS --available-only --json',
         'zepta simulator boot "iPhone 16"',
         'zepta simulator create "iPhone 16"',
+        'zepta simulator erase "iPhone 16"',
+        'zepta simulator delete <UDID>',
+        'zepta simulator prune',
+        'zepta simulator runtime list --json',
+        'zepta simulator runtime create --path /path/iOS.simruntime',
+        'zepta simulator runtime delete com.apple.CoreSimulator.SimRuntime.iOS-18-0',
+        'zepta simulator device-types --json',
+        'zepta simulator location set 37.3349 -122.0090',
+        'zepta simulator media add /tmp/photo.jpg',
+        'zepta simulator screenshot --output /tmp/sim.png',
         'zepta simulator shutdown <UDID>',
         'zepta simulator open'
       ]);
@@ -1268,6 +1519,13 @@ const commands = {
           (devices[runtime] || []).forEach(d => console.log(`  ${d.name} (${d.udid}, ${d.state}, available: ${d.isAvailable})`));
         }
       }
+    } else if (sub === 'screenshot') {
+      const output = getOption('output') || path.join(os.tmpdir(), `zepta-screenshot-${Date.now()}.png`);
+      const nameOrUdid = parsedArgs.args[0] || 'booted';
+      const udid = nameOrUdid === 'booted' ? 'booted' : (resolveSimulatorUdid(nameOrUdid) || nameOrUdid);
+      runCommand('xcrun', ['simctl', 'io', udid, 'screenshot', output]);
+      if (getOption('json')) console.log(JSON.stringify({ success: true, udid, screenshot: output }));
+      else console.log(`Screenshot saved to ${output}`);
     } else if (sub === 'boot') {
       const nameOrUdid = parsedArgs.args[0];
       if (!nameOrUdid) {
@@ -1286,6 +1544,180 @@ const commands = {
       const udid = resolveSimulatorUdid(nameOrUdid) || nameOrUdid;
       runCommand('xcrun', ['simctl', 'shutdown', udid]);
       if (getOption('json')) console.log(JSON.stringify({ success: true, udid }));
+    } else if (sub === 'erase') {
+      const jsonOut = getOption('json');
+      const selected = await resolveSimulatorInputOrPrompt(parsedArgs.args[0], jsonOut);
+      if (!selected) {
+        console.error('Usage: zepta simulator erase <UDID|name>');
+        process.exit(1);
+      }
+      runCommand('xcrun', ['simctl', 'erase', selected]);
+      if (jsonOut) console.log(JSON.stringify({ success: true, udid: selected }));
+      else console.log(`Erased simulator ${selected}`);
+    } else if (sub === 'delete') {
+      const jsonOut = getOption('json');
+      const selected = await resolveSimulatorInputOrPrompt(parsedArgs.args[0], jsonOut);
+      if (!selected) {
+        console.error('Usage: zepta simulator delete <UDID|name>');
+        process.exit(1);
+      }
+      runCommand('xcrun', ['simctl', 'delete', selected]);
+      invalidateSimulatorCache();
+      if (jsonOut) console.log(JSON.stringify({ success: true, udid: selected }));
+      else console.log(`Deleted simulator ${selected}`);
+    } else if (sub === 'prune' || sub === 'delete-unavailable') {
+      runCommand('xcrun', ['simctl', 'delete', 'unavailable']);
+      invalidateSimulatorCache();
+      if (getOption('json')) console.log(JSON.stringify({ success: true, action: 'delete-unavailable' }));
+      else console.log('Deleted unavailable simulators.');
+    } else if (sub === 'clear-cache') {
+      const cachePath = path.join(os.homedir(), 'Library/Developer/CoreSimulator/Caches');
+      if (fs.existsSync(cachePath)) runCommand('rm', ['-rf', cachePath], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+      if (getOption('json')) console.log(JSON.stringify({ success: true, cachePath }));
+      else console.log('Simulator cache cleared.');
+    } else if (sub === 'device-types') {
+      const jsonOut = getOption('json');
+      const platform = getOption('platform');
+      let types = getDeviceTypesList().map(d => ({
+        name: d.name,
+        identifier: d.identifier,
+        productFamily: d.productFamily,
+        minRuntimeVersion: d.minRuntimeVersion,
+        maxRuntimeVersion: d.maxRuntimeVersion
+      }));
+      if (platform) {
+        types = types.filter(t => String(t.productFamily || '').toLowerCase().includes(String(platform).toLowerCase()));
+      }
+      if (jsonOut) console.log(JSON.stringify(types));
+      else types.forEach(t => console.log(`${t.name} (${t.identifier})`));
+    } else if (sub === 'runtime') {
+      const runtimeSub = parsedArgs.args[0] || 'list';
+      const jsonOut = getOption('json');
+      const platform = getOption('platform');
+      const availableOnly = getOption('availableonly');
+      let runtimes = getRuntimesList().map(r => ({
+        name: r.name,
+        identifier: r.identifier,
+        version: r.version,
+        buildversion: r.buildversion,
+        isAvailable: r.isAvailable === true,
+        platform: r.platform || r.identifier?.split('.')[1] || null
+      }));
+      if (platform) {
+        runtimes = runtimes.filter(r => {
+          const hay = `${r.platform || ''} ${r.name || ''}`.toLowerCase();
+          return hay.includes(String(platform).toLowerCase());
+        });
+      }
+      if (availableOnly) runtimes = runtimes.filter(r => r.isAvailable);
+      if (runtimeSub === 'list') {
+        if (jsonOut) console.log(JSON.stringify(runtimes));
+        else runtimes.forEach(r => console.log(`${r.name} (${r.identifier})`));
+      } else if (runtimeSub === 'available') {
+        // xcrun simctl exposes installed runtimes; provide compatibility command shape.
+        if (jsonOut) console.log(JSON.stringify({ runtimes, source: 'installed' }));
+        else {
+          console.log('Downloadable runtime listing is not exposed by simctl; showing installed runtimes:');
+          runtimes.forEach(r => console.log(`${r.name} (${r.identifier})`));
+        }
+      } else if (runtimeSub === 'create') {
+        let runtimePath = parsedArgs.args[1] || getOption('path');
+        if (!runtimePath && process.stdin.isTTY && !jsonOut) {
+          runtimePath = await promptText('Enter .simruntime path');
+        }
+        if (!runtimePath) {
+          console.error('Usage: zepta simulator runtime create --path /path/to/runtime.simruntime');
+          process.exit(1);
+        }
+        const runtimeArgs = ['simctl', 'runtime', 'add', runtimePath];
+        if (getOption('move')) runtimeArgs.push('-m');
+        if (getOption('async')) runtimeArgs.push('-a');
+        runCommand('xcrun', runtimeArgs, { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+        invalidateSimulatorCache();
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: 'runtime-create', path: runtimePath }));
+        else console.log('Runtime added.');
+      } else if (runtimeSub === 'delete') {
+        let identifier = parsedArgs.args[1] || getOption('identifier');
+        if (!identifier && process.stdin.isTTY && !jsonOut) {
+          const choices = runtimes.map(r => ({ name: `${r.name} (${r.identifier})`, identifier: r.identifier }));
+          if (choices.length) {
+            const selected = await promptSelect('Select runtime to delete:', choices, choices[0].name);
+            const matched = choices.find(c => c.name === selected);
+            identifier = matched ? matched.identifier : selected;
+          }
+        }
+        if (!identifier) {
+          console.error('Usage: zepta simulator runtime delete <runtimeIdentifier>');
+          process.exit(1);
+        }
+        const runtimeArgs = ['simctl', 'runtime', 'delete', identifier];
+        if (getOption('dryrun')) runtimeArgs.push('--dry-run');
+        runCommand('xcrun', runtimeArgs, { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+        invalidateSimulatorCache();
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: 'runtime-delete', identifier }));
+        else console.log('Runtime deleted.');
+      } else if (runtimeSub === 'prune') {
+        const days = getOption('days') || parsedArgs.args[1] || 30;
+        const runtimeArgs = ['simctl', 'runtime', 'delete', '--notUsedSinceDays', String(days)];
+        if (getOption('dryrun')) runtimeArgs.push('--dry-run');
+        runCommand('xcrun', runtimeArgs, { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+        invalidateSimulatorCache();
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: 'runtime-prune', days: Number(days) }));
+        else console.log(`Pruned runtimes not used in ${days} days.`);
+      } else {
+        console.error('Unknown simulator runtime subcommand. Use: list, available, create, delete, prune');
+        process.exit(1);
+      }
+    } else if (sub === 'location') {
+      const locationSub = parsedArgs.args[0] || 'set';
+      const jsonOut = getOption('json');
+      let udid = getOption('udid') || parsedArgs.args[3] || 'booted';
+      if (locationSub === 'set') {
+        let latitude = parsedArgs.args[1] || getOption('latitude');
+        let longitude = parsedArgs.args[2] || getOption('longitude');
+        if ((!latitude || !longitude) && process.stdin.isTTY && !jsonOut) {
+          latitude = latitude || await promptText('Latitude');
+          longitude = longitude || await promptText('Longitude');
+        }
+        if (!latitude || !longitude) {
+          console.error('Usage: zepta simulator location set <latitude> <longitude> [--udid <udid|name>]');
+          process.exit(1);
+        }
+        udid = udid === 'booted' ? udid : (resolveSimulatorUdid(udid) || udid);
+        runCommand('xcrun', ['simctl', 'location', udid, 'set', `${latitude},${longitude}`], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: 'location-set', udid, latitude: Number(latitude), longitude: Number(longitude) }));
+        else console.log(`Location set to ${latitude},${longitude} on ${udid}`);
+      } else if (locationSub === 'clear') {
+        udid = udid === 'booted' ? udid : (resolveSimulatorUdid(udid) || udid);
+        runCommand('xcrun', ['simctl', 'location', udid, 'clear'], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+        if (jsonOut) console.log(JSON.stringify({ success: true, action: 'location-clear', udid }));
+        else console.log(`Location cleared on ${udid}`);
+      } else {
+        console.error('Unknown simulator location subcommand. Use: set, clear');
+        process.exit(1);
+      }
+    } else if (sub === 'media') {
+      const mediaSub = parsedArgs.args[0] || 'add';
+      const jsonOut = getOption('json');
+      if (mediaSub !== 'add') {
+        console.error('Unknown simulator media subcommand. Use: add');
+        process.exit(1);
+      }
+      let files = parsedArgs.args.slice(1).filter(Boolean);
+      if (!files.length && getOption('path')) files = [String(getOption('path'))];
+      if (!files.length && process.stdin.isTTY && !jsonOut) {
+        const inPath = await promptText('Path to media file to add');
+        if (inPath) files = [inPath];
+      }
+      if (!files.length) {
+        console.error('Usage: zepta simulator media add <file...> [--udid <udid|name>]');
+        process.exit(1);
+      }
+      const udidRaw = getOption('udid') || 'booted';
+      const udid = udidRaw === 'booted' ? udidRaw : (resolveSimulatorUdid(udidRaw) || udidRaw);
+      runCommand('xcrun', ['simctl', 'addmedia', udid, ...files], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+      if (jsonOut) console.log(JSON.stringify({ success: true, action: 'media-add', udid, files }));
+      else console.log(`Added ${files.length} media file(s) to ${udid}`);
     } else if (sub === 'open') {
       spawnSync('open', ['-a', 'Simulator']);
       if (getOption('json')) console.log(JSON.stringify({ success: true }));
@@ -1304,7 +1736,7 @@ const commands = {
       if (getOption('json')) console.log(JSON.stringify({ success: true, udid, name }));
       else console.log('Created simulator:', name, '(' + udid + ')');
     } else {
-      console.error('Unknown simulator subcommand. Use: list, boot, create, shutdown, open');
+      console.error('Unknown simulator subcommand. Use: list, screenshot, boot, create, erase, delete, prune, runtime, location, media, device-types, shutdown, open');
       process.exit(1);
     }
   },
@@ -1388,7 +1820,7 @@ const commands = {
     }
   },
 
-  ui: () => {
+  ui: async () => {
     const sub = parsedArgs.subcommand;
     if (sub !== 'simulator') {
       console.error('UI commands under ui simulator');
@@ -1398,6 +1830,18 @@ const commands = {
     const uiSub = parsedArgs.args[0]; // e.g. screen, record, tap, ...
     const udid = getOption('udid') || 'booted';
     const json = getOption('json');
+    if (getOption('examples')) {
+      showExamples('ui simulator', [
+        'zepta ui simulator screen --output /tmp/screen.png',
+        'zepta ui simulator record --duration 5 --output /tmp/demo.mov',
+        'zepta ui simulator open-url https://example.com',
+        'zepta ui simulator key home',
+        'zepta ui simulator hide-keyboard',
+        'zepta ui simulator session start --name smoke',
+        'zepta ui simulator session stop',
+        'zepta ui simulator assert text --actual "Welcome" --contains "Wel"'
+      ]);
+    }
 
     if (uiSub === 'screen') {
       const output = getOption('output') || path.join(os.tmpdir(), `zepta-screenshot-${Date.now()}.png`);
@@ -1415,13 +1859,172 @@ const commands = {
 
     if (uiSub === 'record') {
       const output = getOption('output') || path.join(os.tmpdir(), `zepta-record-${Date.now()}.mov`);
-      const duration = getOption('duration') || 5;
-      if (json) console.log(JSON.stringify({ message: 'Recording not implemented', output }));
-      else console.log('Recording not implemented. Use Xcode or simctl for video capture.');
+      const durationRaw = getOption('duration') || 5;
+      const duration = Number(durationRaw);
+      if (!Number.isFinite(duration) || duration <= 0) {
+        console.error('Invalid --duration. Provide seconds > 0.');
+        process.exit(1);
+      }
+      const rec = spawn('xcrun', ['simctl', 'io', udid, 'recordVideo', output], { stdio: ['ignore', 'pipe', 'pipe'] });
+      await new Promise((resolve) => setTimeout(resolve, Math.ceil(duration * 1000)));
+      try { rec.kill('SIGINT'); } catch (_) {}
+      await new Promise((resolve) => {
+        rec.on('exit', () => resolve());
+        setTimeout(resolve, 1000);
+      });
+      if (json) console.log(JSON.stringify({ success: true, recording: output, duration }));
+      else console.log(`Recording saved to ${output}`);
       return;
     }
 
-    const stubbed = ['find', 'tap', 'double-tap', 'type', 'swipe', 'scroll', 'back', 'pinch', 'rotate', 'wait', 'erase', 'hide-keyboard', 'key', 'open-url', 'clear-state', 'button', 'session', 'assert'];
+    if (uiSub === 'open-url') {
+      let url = parsedArgs.args[1] || getOption('url');
+      if (!url && process.stdin.isTTY && !json) url = await promptText('Enter URL to open', 'https://example.com');
+      if (!url) {
+        console.error('Usage: zepta ui simulator open-url <url>');
+        process.exit(1);
+      }
+      runCommand('xcrun', ['simctl', 'openurl', udid, url], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+      if (json) console.log(JSON.stringify({ success: true, action: 'open-url', udid, url }));
+      else console.log(`Opened URL on simulator: ${url}`);
+      return;
+    }
+
+    if (uiSub === 'key') {
+      let key = parsedArgs.args[1] || getOption('keycode') || getOption('key');
+      if (!key && process.stdin.isTTY && !json) key = await promptText('Enter key to press (e.g. home, escape, return)', 'home');
+      if (!key) {
+        console.error('Usage: zepta ui simulator key <key>');
+        process.exit(1);
+      }
+      runCommand('xcrun', ['simctl', 'keypress', udid, key], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+      if (json) console.log(JSON.stringify({ success: true, action: 'key', udid, key }));
+      else console.log(`Pressed key "${key}" on simulator.`);
+      return;
+    }
+
+    if (uiSub === 'hide-keyboard') {
+      runCommand('xcrun', ['simctl', 'keypress', udid, 'escape'], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+      if (json) console.log(JSON.stringify({ success: true, action: 'hide-keyboard', udid }));
+      else console.log('Requested keyboard hide (Escape key).');
+      return;
+    }
+
+    if (uiSub === 'session') {
+      const sessionSub = parsedArgs.args[1] || 'status';
+      if (sessionSub === 'start') {
+        const name = parsedArgs.args[2] || getOption('name') || `session-${Date.now()}`;
+        const session = { name, udid, startedAt: new Date().toISOString() };
+        writeUiSession(session);
+        if (json) console.log(JSON.stringify({ success: true, session }));
+        else console.log(`Session started: ${name}`);
+      } else if (sessionSub === 'stop') {
+        const session = readUiSession();
+        clearUiSession();
+        if (json) console.log(JSON.stringify({ success: true, stopped: session || null }));
+        else console.log(`Session stopped${session ? `: ${session.name}` : ''}`);
+      } else if (sessionSub === 'status') {
+        const session = readUiSession();
+        if (json) console.log(JSON.stringify({ session }));
+        else console.log(session ? `Active session: ${session.name} (${session.udid})` : 'No active session.');
+      } else {
+        console.error('Unknown session command. Use: start, stop, status');
+        process.exit(1);
+      }
+      return;
+    }
+
+    if (uiSub === 'assert') {
+      const assertType = parsedArgs.args[1];
+      if (!assertType) {
+        console.error('Usage: zepta ui simulator assert <text|equals|file-exists> [args]');
+        process.exit(1);
+      }
+      let passed = false;
+      let details = '';
+      if (assertType === 'text') {
+        const actual = getOption('actual') || parsedArgs.args[2] || '';
+        const contains = getOption('contains') || parsedArgs.args[3] || '';
+        if (!actual || !contains) {
+          console.error('Usage: zepta ui simulator assert text --actual "<text>" --contains "<fragment>"');
+          process.exit(1);
+        }
+        passed = actual.includes(contains);
+        details = `expected actual to contain fragment`;
+      } else if (assertType === 'equals') {
+        const actual = getOption('actual') || parsedArgs.args[2];
+        const expected = getOption('expected') || parsedArgs.args[3];
+        if (actual == null || expected == null) {
+          console.error('Usage: zepta ui simulator assert equals --actual "<value>" --expected "<value>"');
+          process.exit(1);
+        }
+        passed = String(actual) === String(expected);
+        details = 'expected values to be equal';
+      } else if (assertType === 'file-exists') {
+        const file = getOption('path') || parsedArgs.args[2];
+        if (!file) {
+          console.error('Usage: zepta ui simulator assert file-exists <path>');
+          process.exit(1);
+        }
+        passed = fs.existsSync(file);
+        details = `expected file to exist: ${file}`;
+      } else if (['visible', 'hidden', 'enabled', 'disabled'].includes(assertType)) {
+        // Placeholder compatibility behavior for command shape; requires accessibility tree integration for real checks.
+        const actual = String(getOption('actual') || parsedArgs.args[2] || '').toLowerCase();
+        if (!actual) {
+          console.error(`Usage: zepta ui simulator assert ${assertType} --actual "<true|false>"`);
+          process.exit(1);
+        }
+        const truthy = ['true', '1', 'yes'].includes(actual);
+        passed = (assertType === 'visible' || assertType === 'enabled') ? truthy : !truthy;
+        details = `interpreted --actual as ${truthy}`;
+      } else {
+        console.error('Unknown assert type. Use: text, equals, file-exists, visible, hidden, enabled, disabled');
+        process.exit(1);
+      }
+      if (json) console.log(JSON.stringify({ type: 'assert', assertType, passed, details }));
+      else console.log(passed ? `Assertion passed: ${assertType}` : `Assertion failed: ${assertType} (${details})`);
+      if (!passed) process.exit(1);
+      return;
+    }
+
+    if (uiSub === 'wait') {
+      const seconds = Number(getOption('seconds') || parsedArgs.args[1] || 1);
+      if (!Number.isFinite(seconds) || seconds < 0) {
+        console.error('Usage: zepta ui simulator wait [seconds]');
+        process.exit(1);
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.round(seconds * 1000)));
+      if (json) console.log(JSON.stringify({ success: true, action: 'wait', seconds }));
+      else console.log(`Waited ${seconds}s`);
+      return;
+    }
+
+    if (uiSub === 'back') {
+      runCommand('xcrun', ['simctl', 'keypress', udid, 'escape'], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+      if (json) console.log(JSON.stringify({ success: true, action: 'back', udid }));
+      else console.log('Back action sent (Escape key).');
+      return;
+    }
+
+    if (uiSub === 'button') {
+      let button = parsedArgs.args[1] || getOption('name') || getOption('button') || 'home';
+      const buttonMap = { home: 'home', lock: 'lock', side: 'lock', siri: 'siri', escape: 'escape', return: 'return' };
+      const keyName = buttonMap[String(button).toLowerCase()] || button;
+      runCommand('xcrun', ['simctl', 'keypress', udid, keyName], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+      if (json) console.log(JSON.stringify({ success: true, action: 'button', udid, button: keyName }));
+      else console.log(`Button action sent: ${keyName}`);
+      return;
+    }
+
+    if (uiSub === 'erase' || uiSub === 'clear-state') {
+      runCommand('xcrun', ['simctl', 'erase', udid], { stdio: getOption('verbose') ? 'inherit' : 'pipe' });
+      if (json) console.log(JSON.stringify({ success: true, action: uiSub, udid }));
+      else console.log(`Simulator ${udid} erased.`);
+      return;
+    }
+
+    const stubbed = ['find', 'tap', 'double-tap', 'type', 'swipe', 'scroll', 'pinch', 'rotate', 'touch'];
     const isStub = stubbed.some(s => uiSub === s || uiSub && uiSub.startsWith('assert '));
     if (uiSub && (isStub || !['screen', 'record'].includes(uiSub))) {
       if (json) console.log(JSON.stringify({ message: 'Not implemented', command: uiSub }));
@@ -1591,14 +2194,27 @@ function showHelp() {
   console.log('');
   console.log('Core:  context, init, build, run, test, clean, logs, stop, apps');
   console.log('Project: project create|schemes|configs|packages ...');
+  console.log('         project packages list|add|remove|link|resolve|update|clear');
+  console.log('         project sync-profiles');
   console.log('Simulator: simulator list|boot|shutdown|open ...');
+  console.log('           simulator screenshot|erase|delete|prune|runtime|location|media|device-types|clear-cache');
   console.log('Device: device list|install|uninstall|launch ...');
-  console.log('UI: ui simulator screen|record|...');
+  console.log('UI: ui simulator screen|record|open-url|key|hide-keyboard|session|assert|...');
   console.log('Other: license, update');
   console.log('');
   console.log('Common options: -w/--workspace, -s/--scheme, -S/--simulator, -D/--device, -C/--configuration, -d/--derived-data-path, --json, --examples');
   console.log('Simulator: --create-simulator (create if missing); interactive when TTY (choose device type/runtime)');
-  console.log('Global: -h/--help, --version');
+  console.log('Global: -h/--help, --version, --changelog');
+  process.exit(0);
+}
+
+function showChangelog() {
+  const changelogPath = path.join(__dirname, 'CHANGELOG.md');
+  if (fs.existsSync(changelogPath)) {
+    console.log(changelogPath);
+  } else {
+    console.log('https://github.com/bhagya/zepta/blob/main/CHANGELOG.md');
+  }
   process.exit(0);
 }
 
@@ -1615,6 +2231,7 @@ function showVersion() {
 // Run CLI only when executed as main (allows Jest to require and test)
 if (require.main === module) {
   (async () => {
+    if (parsedArgs.options.changelog) showChangelog();
     if (parsedArgs.options.help || parsedArgs.options.version) {
       if (parsedArgs.options.version) showVersion();
       showHelp();
@@ -1671,5 +2288,6 @@ module.exports = {
   clearLaunchedApp,
   clearAllLaunchedApps,
   showHelp,
-  showVersion
+  showVersion,
+  showChangelog
 };

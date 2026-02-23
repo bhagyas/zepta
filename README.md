@@ -28,14 +28,23 @@ zepta <command> [options]
 | `clean`                             | Clean build artifacts / derived data               |
 | `logs`                              | Stream app logs by identifier                      |
 | `project create`                    | Create a new project (stub)                        |
+| `project packages resolve/update`   | Resolve or update Swift package dependencies       |
+| `project packages add/link/remove`  | Manage Swift package manifest dependencies         |
+| `project packages clear`            | Clear package caches                               |
+| `project sync-profiles`             | Sync provisioning profiles via xcodebuild          |
 | `simulator list` / `simulator boot` | List or boot simulators                            |
+| `simulator erase` / `delete` / `prune` | Simulator lifecycle cleanup                      |
+| `simulator runtime` / `device-types` | Runtime and simulator type discovery              |
+| `simulator location` / `media add`  | Simulate location and import media                 |
 | `device list` / `device install`    | List devices, install app                          |
-| `ui simulator screen`               | Take simulator screenshot                          |
+| `ui simulator screen` / `record`    | Capture screenshot/video from simulator            |
+| `ui simulator open-url` / `key`     | Drive URL open and keypress interactions           |
+| `ui simulator session` / `assert`   | Session metadata and CLI assertions                |
 | `license`                           | License status                                     |
 | `init`                              | Save settings to `.zepta.json`                     |
 
 
-Common options: `-w`/`--workspace`, `-s`/`--scheme`, `-S` simulator, `-D` device, `-c`/`--config`, `--json`, `--examples`.
+Common options: `-w`/`--workspace`, `-s`/`--scheme`, `-S` simulator, `-D` device, `-c`/`--config`, `--json`, `--examples`, `--changelog`.
 
 ## Commercial alternative
 

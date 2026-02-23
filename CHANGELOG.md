@@ -4,6 +4,86 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-23
+
+### Added
+
+- Added global `--changelog` flag to print the local changelog path (or repository URL fallback), matching FlowDeck-style discoverability for release notes.
+
+- Added `project sync-profiles` to trigger provisioning profile synchronization with `xcodebuild` using `-allowProvisioningUpdates` and `-allowProvisioningDeviceRegistration`.
+
+- Expanded `project packages` with:
+  - `resolve` and `update` (xcodebuild package resolution flows),
+  - `clear` (DerivedData `SourcePackages` cleanup, plus optional global SwiftPM cache cleanup via `--all`).
+
+- Expanded simulator lifecycle parity with new subcommands:
+  - `simulator screenshot`,
+  - `simulator erase`,
+  - `simulator delete`,
+  - `simulator prune` / `simulator delete-unavailable`,
+  - `simulator runtime list|available`,
+  - `simulator device-types`,
+  - `simulator clear-cache`.
+
+- Added interactive simulator selection for `simulator erase` and `simulator delete` when run in a TTY without an explicit simulator argument, while still supporting flag-based usage (`<UDID|name>`).
+
+### Tests
+
+- Added tests for:
+  - `--changelog` argument parsing and command behavior,
+  - `project packages clear --json`,
+  - `project sync-profiles` required-flag validation,
+  - `simulator erase/delete` argument validation,
+  - `simulator runtime list --json`,
+  - `simulator device-types --json`.
+
+- Expanded package management parity with:
+  - `project packages add`,
+  - `project packages link`,
+  - `project packages remove`,
+  - `--manifest` support for package operations.
+
+- Expanded simulator command parity with:
+  - `simulator runtime create|delete|prune`,
+  - `simulator location set|clear`,
+  - `simulator media add`.
+
+- Added interactive fallback prompts (TTY, non-JSON) plus flag-based inputs for new package and simulator operations.
+
+- Added tests for:
+  - package add/link/remove missing-input validation,
+  - runtime create/delete missing-input validation,
+  - simulator location/media missing-input validation.
+
+- Implemented non-stub UI simulator commands:
+  - `ui simulator record` (video capture via `simctl io recordVideo`),
+  - `ui simulator open-url`,
+  - `ui simulator key`,
+  - `ui simulator hide-keyboard`,
+  - `ui simulator session start|stop|status`,
+  - `ui simulator assert` (`text`, `equals`, `file-exists`, and compatibility boolean checks for `visible/hidden/enabled/disabled`).
+
+- Added interactive fallback prompts (TTY, non-JSON) for UI commands that require input (`open-url`, `key`).
+
+- Added a dedicated parity-matrix test suite to validate parity-critical command/help surface and validation semantics in CI.
+
+- Prioritized xcodebuild parity improvements:
+  - Added `--dry-run` and `--print-command` support to xcodebuild-backed flows:
+    - `build`
+    - `test`
+    - `run` (prints xcodebuild + simulator/device command chain)
+    - `project sync-profiles`
+    - `project packages resolve|update`
+  - Added isolated `--xcodebuild-env` handling so command-specific environment variables are passed per invocation.
+  - Added xcodebuild dry-run tests for build/test/sync-profiles command paths.
+
+- Expanded non-stub UI simulator commands further:
+  - `ui simulator wait`
+  - `ui simulator back`
+  - `ui simulator button`
+  - `ui simulator erase`
+  - `ui simulator clear-state`
+
 ## [0.2.0] - 2025-02-20
 
 ### Added

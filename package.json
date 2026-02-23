@@ -1,6 +1,6 @@
 {
   "name": "zepta",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Fast terminal CLI for Xcode/iOS/macOS workflows – build, run, test, simulate without opening Xcode",
   "main": "zepta.js",
   "bin": {

@@ -58,4 +58,10 @@ describe('update command', () => {
     const data = JSON.parse(r.stdout.trim());
     expect(data).toHaveProperty('updateAvailable');
   });
+
+  test('global --changelog exits 0 and prints changelog path or URL', () => {
+    const r = runZepta(['--changelog']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/CHANGELOG\.md|github\.com/);
+  });
 });

@@ -2,7 +2,7 @@
 
 Discover workspace, schemes, simulators, and build configs.
 
-Use `context` to inspect a project and output all available build options.
+Use `context` to inspect a project and output all available build options. Scheme and simulator lists are cached in memory (60s TTL) so repeated `context` or other commands in the same session are faster.
 
 ## Examples
 

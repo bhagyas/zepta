@@ -31,6 +31,8 @@ zepta build -v
 # Extra xcodebuild arguments (use = to avoid parsing issues)
 zepta build --xcodebuild-options=-quiet
 zepta build --xcodebuild-env=CI=true
+zepta build --print-command
+zepta build --dry-run --json
 
 # Create simulator if missing (e.g. fresh Xcode install)
 zepta build -w App.xcworkspace -s App -S "iPhone 16" --create-simulator
@@ -55,6 +57,8 @@ zepta build --config .zepta.json
 | `--config` | `-c` | Load settings from JSON config file |
 | `--xcodebuild-options` | | Extra xcodebuild arguments |
 | `--xcodebuild-env` | | Xcodebuild environment variables |
+| `--print-command` | | Print the exact `xcodebuild` command |
+| `--dry-run` | | Validate/compose command but do not execute build |
 
 ## "The requested device could not be found"
 
@@ -70,6 +74,7 @@ When `--json` is set, build emits structured NDJSON so CI and agents can parse f
 - **build_started** – Scheme and destination.
 - **error** – For each compiler error/warning: `file`, `line`, `column`, `message`, `severity` (Swift/Clang format).
 - **build_completed** – `success` (boolean), `duration` (seconds).
+- **command** – Printed when `--print-command` or `--dry-run` is used.
 
 Example:
 

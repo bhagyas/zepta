@@ -34,6 +34,8 @@ zepta run -S "iPhone 16" --create-simulator
 
 # JSON output
 zepta run --json
+zepta run --print-command
+zepta run --dry-run --json
 ```
 
 ## Auto-create simulator
@@ -58,6 +60,8 @@ If the simulator name (e.g. `-S "iPhone 16"`) is not found:
 | `--launch-options` | | App launch arguments |
 | `--launch-env` | | App launch environment variables |
 | `--create-simulator` | | Create simulator if not found (or prompt when TTY) |
+| `--print-command` | | Print underlying `xcodebuild`/`simctl`/`devicectl` commands |
+| `--dry-run` | | Compose build/launch commands but do not execute |
 | `--config` | `-c` | Load settings from JSON config |
 
 ## JSON output (NDJSON)
@@ -66,3 +70,5 @@ If the simulator name (e.g. `-S "iPhone 16"`) is not found:
 {"type":"status","stage":"LAUNCHING","message":"Launching on iPhone 16"}
 {"type":"result","success":true,"operation":"run"}
 ```
+
+With `--print-command` or `--dry-run`, run emits `command` events with the exact shell command strings it would execute.

@@ -28,6 +28,14 @@ describe('build command', () => {
     expect(r.status).not.toBe(0);
     expect(r.stderr || r.stdout).toMatch(/simulator|device/);
   });
+
+  test('build --dry-run --json emits command and completes without executing xcodebuild', () => {
+    const r = runZepta(['build', '-w', 'App.xcworkspace', '-s', 'App', '-S', 'iPhone 16', '--dry-run', '--json']);
+    expect(r.status).toBe(0);
+    const lines = r.stdout.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    expect(lines.some(l => l.type === 'command' && /xcodebuild/.test(l.command))).toBe(true);
+    expect(lines.some(l => l.type === 'build_completed' && l.dryRun === true)).toBe(true);
+  });
 });
 
 describe('clean command', () => {
@@ -63,5 +71,22 @@ describe('run command', () => {
     const r = runZepta(['run', '--no-build']);
     // Either fails at build step (no config) or later; we expect non-zero when no project
     expect(r.status).not.toBe(0);
+  });
+
+  test('run --dry-run --json emits command events and succeeds', () => {
+    const r = runZepta(['run', '-w', 'App.xcworkspace', '-s', 'App', '-S', 'iPhone 16', '--dry-run', '--json']);
+    expect(r.status).toBe(0);
+    const lines = r.stdout.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    expect(lines.some(l => l.type === 'command' && /xcodebuild/.test(l.command))).toBe(true);
+    expect(lines.some(l => l.type === 'command' && /simctl/.test(l.command))).toBe(true);
+    expect(lines.some(l => l.type === 'result' && l.operation === 'run' && l.dryRun === true)).toBe(true);
+  });
+
+  test('test --dry-run --json emits command/result without simulator validation', () => {
+    const r = runZepta(['test', '-w', 'App.xcworkspace', '-s', 'App', '-S', 'iPhone 16', '--dry-run', '--json']);
+    expect(r.status).toBe(0);
+    const lines = r.stdout.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    expect(lines.some(l => l.type === 'command' && /xcodebuild/.test(l.command))).toBe(true);
+    expect(lines.some(l => l.type === 'result' && l.operation === 'test' && l.dryRun === true)).toBe(true);
   });
 });

@@ -151,4 +151,9 @@ describe('parseArgs (FlowDeck-style CLI)', () => {
     const p2 = parseArgs(argv(['--help']));
     expect(p2.options.help).toBe(true);
   });
+
+  test('parses global --changelog', () => {
+    const p = parseArgs(argv(['--changelog']));
+    expect(p.options.changelog).toBe(true);
+  });
 });

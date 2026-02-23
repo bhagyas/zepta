@@ -32,6 +32,7 @@ zepta test --plan "Smoke.xctestplan"
 
 # JSON output
 zepta test --json
+zepta test --dry-run --json
 ```
 
 ### Options
@@ -49,6 +50,10 @@ zepta test --json
 | `--create-simulator` | | Create simulator if not found (or prompt when TTY) |
 | `--json` | `-j` | Output NDJSON events |
 | `--verbose` | `-v` | Show xcodebuild output |
+| `--xcodebuild-options` | | Extra xcodebuild arguments |
+| `--xcodebuild-env` | | Xcodebuild environment variables |
+| `--print-command` | | Print the exact `xcodebuild` command |
+| `--dry-run` | | Compose command but do not execute test run |
 
 ### JSON output (NDJSON)
 
